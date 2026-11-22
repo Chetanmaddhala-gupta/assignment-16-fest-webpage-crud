@@ -1,11 +1,13 @@
 const schemas = {
-  students: { noun: "student", fields: [{ key: "name", label: "Full name", required: true }, { key: "email", label: "Email", type: "email", required: true }, { key: "course", label: "Course", required: true }], columns: ["name", "email", "course"] },
-  books: { noun: "book", fields: [{ key: "title", label: "Book title", required: true }, { key: "author", label: "Author", required: true }, { key: "genre", label: "Genre", required: true }], columns: ["title", "author", "genre"] },
   events: { noun: "event", fields: [{ key: "name", label: "Event name", required: true }, { key: "date", label: "Date", type: "date", required: true }, { key: "venue", label: "Venue", required: true }], columns: ["name", "date", "venue"] }
 };
 const entity = document.body.dataset.entity;
 const schema = schemas[entity];
-const storageKey = `assignment-crud-${entity}-v1`;
+const endpoint = `/${entity}`;
+const status = document.createElement("p");
+status.setAttribute("role", "status");
+status.setAttribute("aria-live", "polite");
+document.querySelector("#record-form").before(status);
 const form = document.querySelector("#record-form");
 const tableWrap = document.querySelector("#table-wrap");
 const empty = document.querySelector("#empty");
@@ -13,17 +15,38 @@ const search = document.querySelector("#search");
 const count = document.querySelector("#record-count");
 const title = document.querySelector("#form-title");
 let editingId = null;
-let records = loadRecords();
+let records = [];
+let busy = false;
 
-function loadRecords() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(storageKey) || "[]");
-    return Array.isArray(saved) ? saved : [];
-  } catch {
-    return [];
+async function request(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...options.headers }
+  });
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    try {
+      const error = await response.json();
+      detail = typeof error.detail === "string" ? error.detail
+        : (error.detail || []).map(item => item.msg).join("; ") || detail;
+    } catch { /* Keep the HTTP status when the server returns no JSON. */ }
+    throw new Error(detail);
   }
+  return response.status === 204 ? null : response.json();
 }
-function saveRecords() { localStorage.setItem(storageKey, JSON.stringify(records)); }
+async function loadRecords() {
+  records = await request(endpoint);
+  render();
+}
+function showError(error) {
+  status.textContent = error.message || "Cannot reach the API. Start the FastAPI server and reload.";
+}
+function setBusy(value) {
+  busy = value;
+  for (const control of form.elements) control.disabled = value;
+  search.disabled = value;
+  for (const button of tableWrap.querySelectorAll("button")) button.disabled = value;
+}
 function fieldId(key) { return `field-${key}`; }
 
 schema.fields.forEach((field) => {
@@ -51,18 +74,22 @@ cancel.hidden = true;
 cancel.addEventListener("click", resetForm);
 form.append(cancel);
 
-form.addEventListener("submit", (event) => {
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const values = Object.fromEntries(schema.fields.map((field) => [field.key, form.elements[field.key].value.trim()]));
   if (schema.fields.some((field) => !values[field.key])) return;
-  if (editingId) {
-    records = records.map((record) => record.id === editingId ? { ...record, ...values } : record);
-  } else {
-    records.unshift({ id: crypto.randomUUID(), ...values, createdAt: Date.now() });
-  }
-  saveRecords();
-  resetForm();
-  render();
+  if (busy) return;
+  setBusy(true);
+  try {
+    await request(editingId === null ? endpoint : `${endpoint}/${editingId}`, {
+      method: editingId === null ? "POST" : "PUT",
+      body: JSON.stringify(values)
+    });
+    resetForm();
+    status.textContent = "Saved successfully.";
+    await loadRecords();
+  } catch (error) { showError(error); }
+  finally { setBusy(false); }
 });
 
 function resetForm() {
@@ -74,7 +101,7 @@ function resetForm() {
 }
 function editRecord(id) {
   const record = records.find((item) => item.id === id);
-  if (!record) return;
+  if (busy || !record) return;
   editingId = id;
   schema.fields.forEach((field) => { form.elements[field.key].value = record[field.key] || ""; });
   title.textContent = `Edit ${schema.noun}`;
@@ -83,11 +110,16 @@ function editRecord(id) {
   form.scrollIntoView({ behavior: "smooth", block: "center" });
   form.elements[schema.fields[0].key].focus();
 }
-function deleteRecord(id) {
-  records = records.filter((item) => item.id !== id);
-  saveRecords();
-  if (editingId === id) resetForm();
-  render();
+async function deleteRecord(id) {
+  if (busy) return;
+  setBusy(true);
+  try {
+    await request(`${endpoint}/${id}`, { method: "DELETE" });
+    if (editingId === id) resetForm();
+    status.textContent = "Deleted successfully.";
+    await loadRecords();
+  } catch (error) { showError(error); }
+  finally { setBusy(false); }
 }
 function render() {
   const query = search.value.trim().toLocaleLowerCase();
@@ -125,4 +157,11 @@ function render() {
   tableWrap.append(table);
 }
 search.addEventListener("input", render);
-render();
+async function initialize() {
+  setBusy(true);
+  status.textContent = "Loading records...";
+  try { await loadRecords(); status.textContent = ""; }
+  catch (error) { showError(error); }
+  finally { setBusy(false); }
+}
+initialize();
